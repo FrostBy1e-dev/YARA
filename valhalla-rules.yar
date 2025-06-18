@@ -16,6 +16,7 @@
 import "math"
 import "pe"
 
+
 rule MAL_NET_Katz_Stealer_Loader_May25_RID32FC : DEMO MAL {
    meta:
       description = "Detects .NET based Katz stealer loader"
