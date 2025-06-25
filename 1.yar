@@ -176,3 +176,81 @@ rule DetectMaliciousFirefoxAddonInstall
         3 of them and
         filesize < 1MB
 }
+
+rule JD_Exploit_MS14_064_VBScript
+{
+    meta:
+        description = "Detects VBScript using OLE and FileSystemObject to drop and execute payloads (MS14-064 style)"
+        author = "JD-SRE"
+        date = "2025-06-19"
+        reference = "https://msrc.microsoft.com/update-guide/en-US/vulnerability/MS14-064"
+        category = "exploit"
+
+    strings:
+        $s1 = "CreateObject(\"Microsoft.XMLHTTP\")" nocase
+        $s2 = "GetSpecialFolder(2)" nocase
+        $s3 = "scriptName = folder + \"\\HuvP.vbs\"" nocase
+        $s4 = "ShellExecute \"wscript.exe\"" nocase
+        $s5 = "chrw(32767)" nocase
+
+    condition:
+        3 of ($s*)
+}
+
+
+rule JD_Exploit_HeapSpray_JS
+{
+    meta:
+        description = "Detects JavaScript-based heap spray exploit via shellcode and memory fill"
+        author = "JD-SRE"
+        date = "2025-06-19"
+        category = "exploit"
+
+    strings:
+        $s1 = "var memory = new Array();" nocase
+        $s2 = "function sprayHeap(" nocase
+        $s3 = "retSlide = unescape(\"%u9399%ud6b2" nocase
+        $s4 = "retSlide += retSlide;" nocase
+        $s5 = "document.write(\"<table style=position:absolute;clip:rect(0)>" nocase
+
+    condition:
+        3 of ($s*)
+}
+
+rule JD_exploit_MS09_072_StyleObject
+{
+    meta:
+        description = "Detects obfuscated MS09-072-style HTML exploit using style object and heap spray"
+        author = "JD-SRE"
+        date = "2025-06-19"
+        reference = "https://msrc.microsoft.com/update-guide/en-US/vulnerability/MS09-072"
+
+    strings:
+        $s1 = "function caD()"
+        $s2 = "document.getElementsByTagName('STYLE')[0].outerHTML++"
+        $s3 = "unescape('%ub84e%u0c27%ub548')" nocase
+        $s4 = "new Array();" nocase
+        $s5 = "<BODY ONLOAD=\"mQBSPAaFaRiUEsahGiFFq()\">" nocase
+
+    condition:
+        3 of ($s*)
+}
+
+rule JD_Suspicious_Obfuscated_HTML_JS
+{
+    meta:
+        description = "Detects obfuscated malicious HTML with JavaScript shellcode"
+        author = "JD-SRE"
+        date = "2025-06-19"
+        severity = "high"
+
+    strings:
+        $s1 = "top.consoleRef = open" nocase
+        $s2 = "unescape(String.fromCharCode" nocase
+        $s3 = "window.location.reload();" nocase
+        $s4 = "<body onload=window();" nocase
+        $s5 = "prompt(wghit, \"\");"
+
+    condition:
+        3 of ($s*)
+}
