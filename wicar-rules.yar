@@ -1,8 +1,8 @@
-rule DetectVLCActiveXHeapSpray
+rule JD_VLC_ActiveXHeapSpray
 {
     meta:
         description = "Detects HTML files with JavaScript heap spraying and VLC ActiveX exploits"
-        author = "Jay"
+        author = "JD-SRE"
         threat_type = "Exploit"
         reference = "Based on provided VLC ActiveX HTML content"
     strings:
@@ -34,11 +34,11 @@ rule DetectVLCActiveXHeapSpray
         filesize < 1MB
 }
  
-rule DetectMS09002MemoryCorruption
+rule JD_MS09002_MemoryCorruption
 {
     meta:
         description = "Detects HTML files exploiting MS09-002 memory corruption vulnerabilities with obfuscated JavaScript"
-        author = "JD"
+        author = "JD-SRE"
         threat_type = "Exploit"
         reference = "Based on ms09_002_memory_corruption.html content"
     strings:
@@ -65,11 +65,11 @@ rule DetectMS09002MemoryCorruption
         filesize < 1MB
 }
  
-rule DetectMS05054OnloadExploit
+rule JD_MS05054_Onload_Exploit
 {
     meta:
         description = "Detects HTML files exploiting MS05-054 vulnerabilities with onload events and obfuscated JavaScript"
-        author = "Jay"
+        author = "JD-SRE"
         threat_type = "Exploit"
         reference = "Based on ms05_054_onload.html content"
     strings:
@@ -96,11 +96,11 @@ rule DetectMS05054OnloadExploit
         filesize < 1MB
 }
  
-rule DetectObfuscatedHtmlObject
+rule JD_Obfuscated_Html_Object
 {
     meta:
         description = "Detects HTML files with obfuscated content and suspicious object tags"
-        author = "JD"
+        author = "JD-SRE"
         threat_type = "Malware"
         reference = "Based on obfuscated HTML file with object tag"
     strings:
@@ -117,11 +117,11 @@ rule DetectObfuscatedHtmlObject
         filesize < 1MB
 }
  
-rule DetectJSCryptoMiner
+rule JD_JS_Crypto_Miner
 {
     meta:
         description = "Detects HTML files with JavaScript-based cryptocurrency mining scripts"
-        author = "JD"
+        author = "JD-SRE"
         threat_type = "Cryptojacking"
         reference = "Based on js_crypto_miner.html filename"
     strings:
@@ -138,11 +138,11 @@ rule DetectJSCryptoMiner
         filesize < 1MB
 }
  
-rule DetectJavaJRE17Exploit
+rule JD_Java_JRE_17_Exploit
 {
     meta:
         description = "Detects HTML files attempting to exploit Java JRE 1.7 vulnerabilities"
-        author = "JD"
+        author = "JD-SRE"
         threat_type = "Malware"
         reference = "Based on java_jre17_exec.html filename"
     strings:
@@ -159,11 +159,11 @@ rule DetectJavaJRE17Exploit
         filesize < 1MB
 }
  
-rule DetectMaliciousFirefoxAddonInstall
+rule JD_Malicious_Firefox_Addon_Install
 {
     meta:
         description = "Detects HTML/JavaScript files that attempt to install malicious Firefox add-ons"
-        author = "JD"
+        author = "JD-SRE"
         threat_type = "Malware"
         reference = "Based on firefox_proto_crmfrequest.html sample"
     strings:
