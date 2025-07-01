@@ -1,241 +1,375 @@
 #!/bin/bash
-# Author: SRE-JD
+# Author: SRE-JD (Modified for disconnection resistance)
 
 # Check if YARA rules file and target directory are provided, with optional threads
 if [ $# -lt 2 ] || [ $# -gt 3 ]; then
     echo "Usage: $0 <rules_file> <target_directory> [threads]"
+    echo "       $0 --resume <state_file>"
     exit 1
 fi
 
-RULES_FILE="$1"
-TARGET_DIR="$2"
+# Handle resume functionality
+if [ "$1" = "--resume" ] && [ -n "$2" ]; then
+    STATE_FILE="$2"
+    if [ ! -f "$STATE_FILE" ]; then
+        echo "Error: State file $STATE_FILE does not exist"
+        exit 1
+    fi
+    # Source the state file to restore variables
+    source "$STATE_FILE"
+    echo "Resuming scan from state file: $STATE_FILE"
+    RESUME_MODE=true
+else
+    RULES_FILE="$1"
+    TARGET_DIR="$2"
+    RESUME_MODE=false
+fi
 
 # Set threads: use provided value or default to number of processors
-if [ $# -eq 3 ]; then
+if [ $# -eq 3 ] && [ "$RESUME_MODE" = false ]; then
     if ! [[ $3 =~ ^[0-9]+$ ]] || [ $3 -lt 1 ]; then
         echo "Error: Threads must be a positive integer >=1"
         exit 1
     fi
     THREADS=$3
-else
+elif [ "$RESUME_MODE" = false ]; then
     THREADS=$(nproc)
 fi
 
-# Convert relative paths to absolute
-RULES_FILE=$(realpath "$RULES_FILE" 2>/dev/null)
-TARGET_DIR=$(realpath "$TARGET_DIR" 2>/dev/null)
+# Convert relative paths to absolute (only in new scan mode)
+if [ "$RESUME_MODE" = false ]; then
+    RULES_FILE=$(realpath "$RULES_FILE" 2>/dev/null)
+    TARGET_DIR=$(realpath "$TARGET_DIR" 2>/dev/null)
 
-# Validate inputs
-if [ ! -f "$RULES_FILE" ]; then
-    echo "Error: Rules file $RULES_FILE does not exist"
-    exit 1
+    # Validate inputs
+    if [ ! -f "$RULES_FILE" ]; then
+        echo "Error: Rules file $RULES_FILE does not exist"
+        exit 1
+    fi
+
+    if [ ! -d "$TARGET_DIR" ]; then
+        echo "Error: Target directory $TARGET_DIR does not exist"
+        exit 1
+    fi
 fi
 
-if [ ! -d "$TARGET_DIR" ]; then
-    echo "Error: Target directory $TARGET_DIR does not exist"
-    exit 1
-fi
-
-# Capture start time
-START_TIME=$(date '+%Y-%m-%d %H:%M:%S')
-START_EPOCH=$(date +%s)
-
-# Capture initial memory usage (in KB)
-MEM_INFO_START=$(cat /proc/meminfo)
-MEM_USED_START=$(echo "$MEM_INFO_START" | grep MemAvailable | awk '{print $2}' || echo "0")
-SWAP_USED_START=$(echo "$MEM_INFO_START" | grep SwapFree | awk '{print $2}' || echo "0")
-TOTAL_SWAP=$(echo "$MEM_INFO_START" | grep SwapTotal | awk '{print $2}' || echo "0")
-
-# Output file for scan report with target directory basename
-if [ "$TARGET_DIR" = "/" ]; then
-    TARGET_BASE="rootfs"
+# Create unique session ID for this scan
+if [ "$RESUME_MODE" = false ]; then
+    SESSION_ID="yara_$(date '+%Y%m%d_%H%M%S')_$$"
+    SCAN_DIR="/tmp/yara_scan_$SESSION_ID"
+    mkdir -p "$SCAN_DIR" || {
+        echo "Error: Could not create scan directory $SCAN_DIR"
+        exit 1
+    }
 else
-    TARGET_BASE=$(basename "$TARGET_DIR")
+    # Use existing scan directory from state file
+    if [ ! -d "$SCAN_DIR" ]; then
+        echo "Error: Scan directory $SCAN_DIR from state file does not exist"
+        exit 1
+    fi
 fi
 
-LOG_FILE="YARA_scan_log_${TARGET_BASE}_Y$(date '+%Y')_M$(date '+%m')_D$(date '+%d')_$(date '+%H-%M-%S').log"
+# Define file paths
+STATE_FILE="$SCAN_DIR/scan_state.sh"
+PID_FILE="$SCAN_DIR/yara.pid"
+LOG_FILE_TEMP="$SCAN_DIR/scan_progress.log"
+TIME_LOG="$SCAN_DIR/timing.log"
+TEMP_INFECTED_LOG="$SCAN_DIR/infected.log"
+MEMORY_LOG="$SCAN_DIR/memory.log"
+FINAL_LOG_FILE="$SCAN_DIR/final_results.log"
 
-if ! touch "$LOG_FILE"; then
-    echo "Error: Could not create log file $LOG_FILE"
-    exit 1
-fi
-
-# Temporary file for timing and results
-TIME_LOG="yara_time_$(date '+%Y%m%d_%H%M%S').log"
-TEMP_INFECTED_LOG="temp_infected_$(date '+%Y%m%d_%H%M%S').log"
-
-# Handle root filesystem scanning vs regular directory scanning
-if [ "$TARGET_DIR" = "/" ]; then
-    echo "Scanning root filesystem (excluding virtual filesystems)..."
-    TEMP_RESULTS="temp_results_$(date '+%Y%m%d_%H%M%S').log"
-    > "$TEMP_RESULTS"
-
-    # Run the multi-directory scan and capture timing
-    {
-        time (
-            for dir in /bin /boot /etc /home /lib /lib64 /opt /root /sbin /srv /usr /var; do
-                if [ -d "$dir" ]; then
-                    echo "Scanning $dir..."
-                    yara -f -p $THREADS -C -r "$RULES_FILE" "$dir" 2>/dev/null
-                fi
-            done
-        )
-    } > "$TEMP_INFECTED_LOG" 2> "$TIME_LOG"
-
-    COMMAND="Multi-directory scan of: /bin /boot /etc /home /lib /lib64 /opt /root /sbin /srv /usr /var"
-    SKIP_SECOND_SCAN=true
-
-    rm -f "$TEMP_RESULTS"
-else
-    # Regular directory scan
-    COMMAND="yara -f -p $THREADS -C -r \"$RULES_FILE\" \"$TARGET_DIR\""
-    echo "Executing: $COMMAND"
-
-    # Execute YARA with sudo and capture timing
-    sudo bash -c "/usr/bin/time -v $COMMAND > \"$TEMP_INFECTED_LOG\" 2> \"$TIME_LOG\""
-    SKIP_SECOND_SCAN=false
-fi
-
-EXIT_STATUS=$?
-
-# Capture end time
-END_TIME=$(date '+%Y-%m-%d %H:%M:%S')
-END_EPOCH=$(date +%s)
-
-# Capture final memory usage (in KB)
-MEM_INFO_END=$(cat /proc/meminfo)
-MEM_USED_END=$(echo "$MEM_INFO_END" | grep MemAvailable | awk '{print $2}' || echo "0")
-SWAP_USED_END=$(echo "$MEM_INFO_END" | grep SwapFree | awk '{print $2}' || echo "0")
-
-# Calculate memory and swap usage (fix the logic)
-# MemAvailable decreases when memory is used, so we calculate differently
-TOTAL_MEM=$(echo "$MEM_INFO_START" | grep MemTotal | awk '{print $2}' || echo "0")
-MEM_AVAILABLE_START=$(echo "$MEM_INFO_START" | grep MemAvailable | awk '{print $2}' || echo "0")
-MEM_AVAILABLE_END=$(echo "$MEM_INFO_END" | grep MemAvailable | awk '{print $2}' || echo "0")
-
-# Memory used = decrease in available memory
-MEM_USED=$((MEM_AVAILABLE_START - MEM_AVAILABLE_END))
-[ $MEM_USED -lt 0 ] && MEM_USED=0
-
-# Swap used = total swap - current free swap
-SWAP_USED=$((TOTAL_SWAP - SWAP_USED_END))
-[ $SWAP_USED -lt 0 ] && SWAP_USED=0
-
-# Convert to MB for readability
-MEM_USED_MB=$(echo "scale=2; $MEM_USED / 1024" | bc 2>/dev/null || echo "0.00")
-SWAP_USED_MB=$(echo "scale=2; $SWAP_USED / 1024" | bc 2>/dev/null || echo "0.00")
-
-# Parse time output, handle empty or malformed output
-if [ "$SKIP_SECOND_SCAN" = true ]; then
-    # For multi-directory scan, parse the time output differently
-    USER_TIME=$(grep '^user' "$TIME_LOG" | awk '{print $2}' || echo "0.00")
-    SYS_TIME=$(grep '^sys' "$TIME_LOG" | awk '{print $2}' || echo "0.00")
-    REAL_TIME=$(grep '^real' "$TIME_LOG" | awk '{print $2}' || echo "0m0.00s")
-    PEAK_RSS="0"  # Built-in time doesn't provide RSS
-else
-    # For regular scan, parse /usr/bin/time -v output
-    USER_TIME=$(grep 'User time' "$TIME_LOG" | awk '{print $NF}' || echo "0.00")
-    SYS_TIME=$(grep 'System time' "$TIME_LOG" | awk '{print $NF}' || echo "0.00")
-    # Fix elapsed time parsing - get the full time string
-    REAL_TIME_RAW=$(grep 'Elapsed.*wall' "$TIME_LOG" | awk '{print $NF}' || echo "0:00.00")
-    # Convert to readable format
-    if [[ $REAL_TIME_RAW == *:* ]]; then
-        REAL_TIME="$REAL_TIME_RAW"
+# Set up final log file name
+if [ "$RESUME_MODE" = false ]; then
+    if [ "$TARGET_DIR" = "/" ]; then
+        TARGET_BASE="rootfs"
     else
-        REAL_TIME="0:$REAL_TIME_RAW"
+        TARGET_BASE=$(basename "$TARGET_DIR")
     fi
-    PEAK_RSS=$(grep 'Maximum resident set size' "$TIME_LOG" | awk '{print $NF}' || echo "0")
+    FINAL_OUTPUT_LOG="YARA_scan_log_${TARGET_BASE}_Y$(date '+%Y')_M$(date '+%m')_D$(date '+%d')_$(date '+%H-%M-%S').log"
 fi
 
-# Add seconds unit to USER_TIME and SYS_TIME if not already present
-[[ $USER_TIME != *s ]] && USER_TIME="${USER_TIME}s"
-[[ $SYS_TIME != *s ]] && SYS_TIME="${SYS_TIME}s"
+# Save state function
+save_state() {
+    cat > "$STATE_FILE" << EOF
+# YARA Scan State File - Generated at $(date)
+RULES_FILE="$RULES_FILE"
+TARGET_DIR="$TARGET_DIR"
+THREADS=$THREADS
+SESSION_ID="$SESSION_ID"
+SCAN_DIR="$SCAN_DIR"
+START_TIME="$START_TIME"
+START_EPOCH=$START_EPOCH
+TARGET_BASE="$TARGET_BASE"
+FINAL_OUTPUT_LOG="$FINAL_OUTPUT_LOG"
+SCAN_STATUS="$SCAN_STATUS"
+SKIP_SECOND_SCAN=$SKIP_SECOND_SCAN
+EOF
+}
 
-# Extract peak RSS (in KB) and convert to MB
-PEAK_RSS_MB=$(echo "scale=2; $PEAK_RSS / 1024" | bc 2>/dev/null || echo "0.00")
+# Cleanup function
+cleanup_and_exit() {
+    local exit_code=${1:-0}
 
-# Calculate elapsed time in seconds
-ELAPSED_SECONDS=$((END_EPOCH - START_EPOCH))
-ELAPSED_SECONDS=$((ELAPSED_SECONDS < 1 ? 1 : ELAPSED_SECONDS)) # Avoid division by zero
-
-# Calculate CPU usage percentage
-TOTAL_CPU=$(echo "${USER_TIME%s} + ${SYS_TIME%s}" | bc 2>/dev/null || echo "0.00")
-CPU_PERCENT=$(echo "scale=2; ($TOTAL_CPU / $ELAPSED_SECONDS) * 100" | bc 2>/dev/null || echo "0.00")
-
-# Determine scan status
-SCAN_STATUS="completed"
-if [ $EXIT_STATUS -ne 0 ]; then
-    SCAN_STATUS="failed"
-fi
-
-# Format infected files list, filter out errors/warnings/skipping messages
-INFECTED_FILES="None"
-if [ -s "$TEMP_INFECTED_LOG" ]; then
-    INFECTED_FILES=$(grep -E '^[[:alnum:]_]+[[:space:]]+/' "$TEMP_INFECTED_LOG" | grep -v -i 'skipping\|error\|warning' | sed 's/^/  - /')
-fi
-
-# Count total detected rule matches, filter out errors/warnings/skipping messages
-TOTAL_RULE_MATCHES=$(grep -E '^[[:alnum:]_]+[[:space:]]+/' "$TEMP_INFECTED_LOG" | grep -v -i 'skipping\|error\|warning' | wc -l)
-
-# Extract skipped files count and list
-if [ -f "$TEMP_INFECTED_LOG" ]; then
-    SKIPPED_FILES_COUNT=$(grep -c '^warning: skipping' "$TEMP_INFECTED_LOG" 2>/dev/null)
-    if [ -z "$SKIPPED_FILES_COUNT" ] || ! [[ "$SKIPPED_FILES_COUNT" =~ ^[0-9]+$ ]]; then
-        SKIPPED_FILES_COUNT=0
+    # Kill YARA process if running
+    if [ -f "$PID_FILE" ]; then
+        local pid=$(cat "$PID_FILE" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill -TERM "$pid" 2>/dev/null
+            sleep 2
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -KILL "$pid" 2>/dev/null
+            fi
+        fi
+        rm -f "$PID_FILE"
     fi
-    SKIPPED_FILES_LIST=$(grep '^warning: skipping' "$TEMP_INFECTED_LOG" 2>/dev/null | sed -e 's/^warning: skipping //' -e 's/ (\(.*\))$//' -e 's/^/  - /')
-else
+
+    # Generate final report if we have partial results
+    if [ -f "$TEMP_INFECTED_LOG" ] && [ "$exit_code" -ne 0 ]; then
+        generate_final_report "interrupted"
+    fi
+
+    save_state
+    echo "Scan session can be resumed with: $0 --resume $STATE_FILE"
+    exit "$exit_code"
+}
+
+# Signal handlers for disconnection resistance
+trap 'nohup bash -c "exec $0 --resume $STATE_FILE" > /dev/null 2>&1 & disown' HUP
+trap 'cleanup_and_exit 130' INT
+trap 'cleanup_and_exit 143' TERM
+trap 'cleanup_and_exit 1' ERR
+
+# Detach from terminal to survive disconnections
+if [ "$RESUME_MODE" = false ]; then
+    # Simplified start message
+    if [ "$TARGET_DIR" = "/" ]; then
+        echo "Starting YARA scan (excluding virtual filesystems)..."
+    else
+        echo "Starting YARA scan..."
+    fi
+
+    # Capture start time
+    START_TIME=$(date '+%Y-%m-%d %H:%M:%S')
+    START_EPOCH=$(date +%s)
+    SCAN_STATUS="running"
+
+    echo "Starting YARA scan at: $START_TIME"
+    echo
+
+    # Determine scan type
+    if [ "$TARGET_DIR" = "/" ]; then
+        SKIP_SECOND_SCAN=true
+    else
+        SKIP_SECOND_SCAN=false
+    fi
+
+    save_state
+fi
+
+# Function to monitor memory usage
+monitor_memory() {
+    local pid=$1
+    local max_rss=0
+    local max_vss=0
+
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ -f "/proc/$pid/status" ]; then
+            local current_rss=$(grep '^VmRSS:' "/proc/$pid/status" 2>/dev/null | awk '{print $2}' || echo "0")
+            local current_vss=$(grep '^VmSize:' "/proc/$pid/status" 2>/dev/null | awk '{print $2}' || echo "0")
+
+            [ "$current_rss" -gt "$max_rss" ] && max_rss=$current_rss
+            [ "$current_vss" -gt "$max_vss" ] && max_vss=$current_vss
+
+            # Log current memory usage
+            echo "$(date '+%H:%M:%S') RSS: ${current_rss}KB VSS: ${current_vss}KB" >> "$MEMORY_LOG"
+        fi
+        sleep 1
+    done
+
+    echo "$max_rss $max_vss"
+}
+
+# Function to generate final report
+generate_final_report() {
+    local final_status="$1"
+
+    # Capture end time
+    END_TIME=$(date '+%Y-%m-%d %H:%M:%S')
+    END_EPOCH=$(date +%s)
+
+    # Parse memory stats
+    if [ -f "$MEMORY_LOG" ]; then
+        MAX_RSS_KB=$(awk '{print $3}' "$MEMORY_LOG" | sed 's/KB//' | sort -n | tail -1)
+        MAX_VSS_KB=$(awk '{print $5}' "$MEMORY_LOG" | sed 's/KB//' | sort -n | tail -1)
+    else
+        MAX_RSS_KB=0
+        MAX_VSS_KB=0
+    fi
+
+    # Convert to MB
+    MAX_RSS_MB=$(echo "scale=2; ${MAX_RSS_KB:-0} / 1024" | bc 2>/dev/null || echo "0.00")
+    MAX_VSS_MB=$(echo "scale=2; ${MAX_VSS_KB:-0} / 1024" | bc 2>/dev/null || echo "0.00")
+
+    # Get current swap usage
+    SWAP_INFO=$(cat /proc/meminfo)
+    SWAP_USED_CURRENT=$(echo "$SWAP_INFO" | grep SwapFree | awk '{print $2}' || echo "0")
+    TOTAL_SWAP=$(echo "$SWAP_INFO" | grep SwapTotal | awk '{print $2}' || echo "0")
+    SWAP_USED=$((TOTAL_SWAP - SWAP_USED_CURRENT))
+    [ $SWAP_USED -lt 0 ] && SWAP_USED=0
+    SWAP_USED_MB=$(echo "scale=2; $SWAP_USED / 1024" | bc 2>/dev/null || echo "0.00")
+
+    # Parse timing information
+    if [ -f "$TIME_LOG" ]; then
+        USER_TIME=$(grep 'User time' "$TIME_LOG" | awk '{print $NF}' || echo "0.00s")
+        SYS_TIME=$(grep 'System time' "$TIME_LOG" | awk '{print $NF}' || echo "0.00s")
+        REAL_TIME_RAW=$(grep 'Elapsed.*wall' "$TIME_LOG" | awk '{print $NF}' || echo "0:00.00")
+        if [[ $REAL_TIME_RAW == *:* ]]; then
+            REAL_TIME="$REAL_TIME_RAW"
+        else
+            REAL_TIME="0:$REAL_TIME_RAW"
+        fi
+    else
+        USER_TIME="N/A"
+        SYS_TIME="N/A"
+        REAL_TIME="N/A"
+    fi
+
+    # Calculate elapsed time
+    ELAPSED_SECONDS=$((END_EPOCH - START_EPOCH))
+    ELAPSED_SECONDS=$((ELAPSED_SECONDS < 1 ? 1 : ELAPSED_SECONDS))
+
+    # Calculate CPU usage percentage
+    if [[ "$USER_TIME" != "N/A" ]] && [[ "$SYS_TIME" != "N/A" ]]; then
+        # Extract numeric values from time strings
+        USER_TIME_NUM=$(echo "$USER_TIME" | sed 's/s$//')
+        SYS_TIME_NUM=$(echo "$SYS_TIME" | sed 's/s$//')
+        TOTAL_CPU=$(echo "$USER_TIME_NUM + $SYS_TIME_NUM" | bc 2>/dev/null || echo "0.00")
+        CPU_PERCENT=$(echo "scale=2; ($TOTAL_CPU / $ELAPSED_SECONDS) * 100" | bc 2>/dev/null || echo "0.00")
+    else
+        CPU_PERCENT="N/A"
+    fi
+
+    # Format infected files list
+    INFECTED_FILES="None"
+    TOTAL_RULE_MATCHES=0
+    if [ -f "$TEMP_INFECTED_LOG" ] && [ -s "$TEMP_INFECTED_LOG" ]; then
+        INFECTED_FILES=$(grep -E '^[[:alnum:]_]+[[:space:]]+/' "$TEMP_INFECTED_LOG" | grep -v -i 'skipping\|error\|warning' | sed 's/^/  - /')
+        TOTAL_RULE_MATCHES=$(grep -E '^[[:alnum:]_]+[[:space:]]+/' "$TEMP_INFECTED_LOG" | grep -v -i 'skipping\|error\|warning' | wc -l)
+    fi
+
+    # Count skipped files - fix the integer comparison error
     SKIPPED_FILES_COUNT=0
-    SKIPPED_FILES_LIST=""
-fi
+    if [ -f "$TEMP_INFECTED_LOG" ]; then
+        SKIPPED_FILES_COUNT=$(grep -c '^warning: skipping' "$TEMP_INFECTED_LOG" 2>/dev/null || echo "0")
+    fi
 
-# Calculate total scanned files
-if [ "$TARGET_DIR" = "/" ]; then
-    TOTAL_FILES="N/A (multi-directory scan)"
-else
-    TOTAL_FILES=$(find "$TARGET_DIR" -type f 2>/dev/null | wc -l)
-fi
+    # Calculate total files
+    if [ "$TARGET_DIR" = "/" ]; then
+        TOTAL_FILES="N/A (multi-directory scan)"
+    else
+        TOTAL_FILES=$(find "$TARGET_DIR" -type f 2>/dev/null | wc -l)
+    fi
 
-# Generate common report for terminal and log
-COMMON_REPORT=$(cat << EOF
+    # Set command used
+    if [ "$SKIP_SECOND_SCAN" = true ]; then
+        COMMAND="Multi-directory scan of: /bin /boot /etc /home /lib /lib64 /opt /root /sbin /srv /usr /var"
+    else
+        COMMAND="yara -f -p $THREADS -C -r \"$RULES_FILE\" \"$TARGET_DIR\""
+    fi
+
+    # Generate report
+    FINAL_REPORT=$(cat << EOF
+==================================================
+YARA SCAN REPORT
+==================================================
 Scan Started at: $START_TIME
+Scan Status: $final_status
+Scan Completed at: $END_TIME
+Command Used: $COMMAND
+
+RESULTS:
 Infected Files:
 $INFECTED_FILES
-The Scan $SCAN_STATUS at: $END_TIME
-Command Used: $COMMAND
+
+PERFORMANCE METRICS:
 User Time: $USER_TIME
 System Time: $SYS_TIME
 Elapsed Time: $REAL_TIME
 Percent of CPU for this Job: $CPU_PERCENT%
-Additional Info:
-  - YARA Rule File: $RULES_FILE
-  - Total Scanned Files: $TOTAL_FILES
-  - Directory to Recursively Scan: $TARGET_DIR
-  - Used Thread/s: $THREADS
-  - Log File: $LOG_FILE
-  - Skipped Files: $SKIPPED_FILES_COUNT
-  - Total Detected Rule Matches: $TOTAL_RULE_MATCHES
-  - Memory Used: $MEM_USED_MB MB
-  - Swap Used: $SWAP_USED_MB MB
-  - Peak Resident Set Size: $PEAK_RSS_MB MB
+Peak Memory Used (RSS): $MAX_RSS_MB MB
+Peak Virtual Memory (VSS): $MAX_VSS_MB MB
+Current System Swap Used: $SWAP_USED_MB MB
+
+SCAN DETAILS:
+- YARA Rule File: $RULES_FILE
+- Directory Scanned: $TARGET_DIR
+- Total Scanned Files: $TOTAL_FILES
+- Threads Used: $THREADS
+- Total Detected Rule Matches: $TOTAL_RULE_MATCHES
+- Skipped Files: $SKIPPED_FILES_COUNT
+
+Scan finished!
+==================================================
 EOF
 )
 
-# Output common report to terminal
-echo "$COMMON_REPORT"
-
-# Save full report to log file, including skipped files list
-{
-    echo "$COMMON_REPORT"
-    echo "Skipped Files List:"
-    if [ "$SKIPPED_FILES_COUNT" -gt 0 ] 2>/dev/null; then
-        echo "$SKIPPED_FILES_LIST"
-    else
-        echo "  None"
+    # Save final report
+    echo "$FINAL_REPORT" > "$FINAL_LOG_FILE"
+    if [ -n "$FINAL_OUTPUT_LOG" ]; then
+        cp "$FINAL_LOG_FILE" "$FINAL_OUTPUT_LOG"
     fi
-} > "$LOG_FILE"
 
-# Clean up temporary files
-rm -f "$TIME_LOG" "$TEMP_INFECTED_LOG"
+    echo "$FINAL_REPORT"
+}
 
-echo "Scan completed. Results saved to: $LOG_FILE"
+# Handle different scan types
+if [ "$TARGET_DIR" = "/" ]; then
+    # Create wrapper script for root scan
+    ROOT_SCAN_SCRIPT="$SCAN_DIR/root_scan.sh"
+    cat > "$ROOT_SCAN_SCRIPT" << EOF
+#!/bin/bash
+for dir in /bin /boot /etc /home /lib /lib64 /opt /root /sbin /srv /usr /var; do
+    if [ -d "\$dir" ]; then
+        /usr/bin/time -v yara -f -p $THREADS -C -r "$RULES_FILE" "\$dir" 2>/dev/null
+    fi
+done
+EOF
+    chmod +x "$ROOT_SCAN_SCRIPT"
+
+    # Execute root scan
+    nohup bash -c "/usr/bin/time -v \"$ROOT_SCAN_SCRIPT\" > \"$TEMP_INFECTED_LOG\" 2> \"$TIME_LOG\"" > /dev/null 2>&1 &
+    YARA_PID=$!
+else
+    # Regular directory scan
+    nohup bash -c "/usr/bin/time -v yara -f -p $THREADS -C -r \"$RULES_FILE\" \"$TARGET_DIR\" > \"$TEMP_INFECTED_LOG\" 2> \"$TIME_LOG\"" > /dev/null 2>&1 &
+    YARA_PID=$!
+fi
+
+# Save PID for monitoring and cleanup
+echo "$YARA_PID" > "$PID_FILE"
+
+# Monitor memory usage in background
+monitor_memory "$YARA_PID" > /dev/null 2>&1 &
+MONITOR_PID=$!
+
+# Wait for scan completion
+wait "$YARA_PID"
+EXIT_STATUS=$?
+
+# Clean up monitoring
+kill "$MONITOR_PID" 2>/dev/null
+rm -f "$PID_FILE"
+
+# Generate final report
+if [ $EXIT_STATUS -eq 0 ]; then
+    generate_final_report "completed successfully"
+    SCAN_STATUS="completed"
+else
+    generate_final_report "completed with errors"
+    SCAN_STATUS="completed_with_errors"
+fi
+
+save_state
+
+# Auto-remove temporary files
+rm -rf "$SCAN_DIR" 2>/dev/null
