@@ -116,49 +116,84 @@ rule JD_Obfuscated_Html_Object
         ($suspicious_type or $obfuscated) and
         filesize < 1MB
 }
- 
 rule JD_JS_Crypto_Miner
 {
     meta:
-        description = "Detects HTML files with JavaScript-based cryptocurrency mining scripts"
+        description = "Detects specific CoinHive-based cryptocurrency mining test malware"
         author = "JD-SRE"
         threat_type = "Cryptojacking"
-        reference = "Based on js_crypto_miner.html filename"
+        reference = "Targets js_crypto_miner.html test file"
     strings:
-        $miner_script1 = "coinhive.min.js" ascii nocase
-        $miner_script2 = "crypto-loot.com" ascii nocase
-        $miner_script3 = "coin-hive.com" ascii nocase
-        $js_miner_func = "startMining" ascii
-        $js_webassembly = "WebAssembly" ascii
-        $js_worker = "new Worker(" ascii
-        $js_throttle = "throttle:" ascii
-        $mining_pool = /wss:\/\/[a-zA-Z0-9\-]+\.mine\.[a-zA-Z0-9]+\// ascii
+        // More specific CoinHive patterns
+        $coinhive_lib = "coinhive.com/lib/coinhive.min.js" ascii nocase
+        $coinhive_anonymous = "CoinHive.Anonymous" ascii
+        $coinhive_miner_start = "miner.start()" ascii
+        
+        // Specific to your test file - the actual site key pattern
+        $test_site_key = /CoinHive\.Anonymous\(['"'][a-zA-Z0-9]{32}['"]/ ascii
+        
+        // Combined patterns that are very specific to mining
+        $mining_throttle_combo = /throttle:\s*0\.\d+/ ascii
+        $mining_mobile_check = "miner.isMobile()" ascii
+        $mining_optout_check = "miner.didOptOut(" ascii
+        
     condition:
-        ($miner_script1 or $miner_script2 or $miner_script3 or $js_miner_func or $js_webassembly or $js_worker or $js_throttle or $mining_pool) and
+        // Must be HTML file
+        (uint32(0) == 0x6d74683c or uint32(0) == 0x4d54483c or // "<htm" or "<HTM"
+         uint16(0) == 0x213c) and // "<!"
+        
+        // Must have CoinHive library reference AND Anonymous miner creation
+        $coinhive_lib and ($coinhive_anonymous or $test_site_key) and
+        
+        // Must have miner start command
+        $coinhive_miner_start and
+        
+        // Additional confirmation - at least one mining-specific pattern
+        ($mining_throttle_combo or $mining_mobile_check or $mining_optout_check) and
+        
         filesize < 1MB
 }
- 
+
 rule JD_Java_JRE_17_Exploit
 {
     meta:
-        description = "Detects HTML files attempting to exploit Java JRE 1.7 vulnerabilities"
+        description = "Detects specific Java JRE 1.7 applet exploit test malware"
         author = "JD-SRE"
         threat_type = "Malware"
-        reference = "Based on java_jre17_exec.html filename"
+        reference = "Targets java_jre17_exec.html test file"
     strings:
-        $applet_tag = "<applet" ascii nocase
-        $object_tag = "<object" ascii nocase
-        $java_deploy = "deployJava" ascii
-        $java_runtime = "java.lang.Runtime" ascii
-        $jar_file = ".jar" ascii
-        $class_file = ".class" ascii
-        $exec_method = "exec(" ascii
+        // Very specific applet patterns
+        $applet_start = "<applet" ascii nocase
+        $applet_end = "</applet>" ascii nocase
+        
+        // Specific archive and class patterns from your test file
+        $java_jre17_archive = "java_jre17_exec.jar" ascii nocase
+        $exploit_class = "Exploit.class" ascii nocase
+        
+        // Generic but suspicious applet patterns
+        $archive_jar = /archive\s*=\s*['"'][^'"]*\.jar['"]/ ascii nocase
+        $code_class = /code\s*=\s*['"'][^'"]*\.class['"]/ ascii nocase
+        
+        // Suspicious applet dimensions (very small = hidden)
+        $tiny_dimensions = /width\s*=\s*['"]*[01]['"].*height\s*=\s*['"]*[01]['"]/ ascii nocase
+        
     condition:
-        ($applet_tag or $object_tag) and
-        2 of ($java_*, $jar_file, $class_file, $exec_method) and
+        // Must be HTML file
+        (uint32(0) == 0x6d74683c or uint32(0) == 0x4d54683c or // "<htm" or "<HTM"
+         uint16(0) == 0x213c) and // "<!"
+        
+        // Must have applet tags
+        $applet_start and $applet_end and
+        
+        // Either match the specific test file OR have suspicious applet patterns
+        (
+            ($java_jre17_archive and $exploit_class) or
+            ($archive_jar and $code_class and $tiny_dimensions)
+        ) and
+        
         filesize < 1MB
 }
- 
+
 rule JD_Malicious_Firefox_Addon_Install
 {
     meta:
